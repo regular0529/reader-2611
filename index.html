@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<meta name="referrer" content="no-referrer">
+<title>Reader</title>
+<link rel="stylesheet" href="app.css">
+<style>
+@font-face{font-family:Pretendard;src:url(fonts/PretendardVariable.woff2) format("woff2-variations");font-weight:45 920;font-display:swap}
+#gate{position:fixed;inset:0;z-index:10;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#15181b;font-family:Pretendard,"Malgun Gothic",sans-serif}
+#gate .bg{position:absolute;inset:-4%;background:url(gate/bg.webp) center/cover;will-change:transform;animation:hh 9s ease-in-out infinite alternate}
+#gate .bg::after{content:"";position:absolute;inset:0;background:rgba(0,0,0,.18)}
+#gate .vg{position:absolute;inset:0;background:radial-gradient(ellipse at 50% 45%,rgba(0,0,0,0) 28%,rgba(0,0,0,.8) 100%)}
+@keyframes hh{0%{transform:translate(0,0) rotate(0)}20%{transform:translate(.4%,-.3%) rotate(.12deg)}40%{transform:translate(-.3%,.4%) rotate(-.08deg)}60%{transform:translate(.25%,.2%) rotate(.1deg)}80%{transform:translate(-.4%,-.2%) rotate(-.12deg)}100%{transform:translate(.1%,.3%) rotate(.05deg)}}
+@media (prefers-reduced-motion:reduce){#gate .bg{animation:none}}
+#gate .box{position:relative;display:flex;flex-direction:column;align-items:center;gap:16px;width:min(340px,88vw)}
+#gate .box img{width:min(300px,72vw);height:auto}
+#gate .f{display:grid;grid-template-columns:1fr 1fr;gap:8px;width:100%}
+#gate input{height:42px;padding:0 12px;border:0;border-radius:6px;background:rgba(255,255,255,.93);font:inherit;font-size:15px;color:#1F252B;min-width:0}
+#gate .w{grid-column:1/3}
+#gate button{height:44px;border:0;border-radius:6px;background:#fff;color:#1F252B;font:inherit;font-size:15px;font-weight:650;cursor:pointer}
+#gate button:disabled{opacity:.7;cursor:wait}
+#gate :focus-visible{outline:2px solid #FFD84D;outline-offset:2px}
+#gateMsg{min-height:1.3em;margin:0;font-size:14px;color:#FFC2C2;text-align:center}
+</style>
+<script type="importmap">{"imports":{"three":"./vendor/three.module.js","three/addons/":"./vendor/jsm/"}}</script>
+</head>
+<body>
+<form id="gate" hidden>
+  <div class="bg"></div><div class="vg"></div>
+  <div class="box">
+    <img src="gate/title.webp" alt="">
+    <div class="f">
+      <input id="nm" autocomplete="name" aria-label="성함" placeholder="성함">
+      <input id="sid" inputmode="numeric" autocomplete="off" aria-label="학번" placeholder="학번">
+      <input id="pw" class="w" type="password" autocomplete="current-password" aria-label="비밀번호" placeholder="비밀번호">
+      <button id="go" class="w">들어가기</button>
+    </div>
+    <p id="gateMsg" role="alert"></p>
+  </div>
+</form>
+<div id="app" hidden></div>
+<script type="module">
+// 배포본(dist)에는 k.json이 있다. 성함·학번·비밀번호 조합마다 따로 만든 열쇠로 공용 키를 풀고, 그 키로 암호화된 파일을 연다.
+// 명단 자체는 올리지 않는다(조합의 해시만 있다). 개발본(src)은 그대로 연다.
+const $ = s => document.getElementById(s);
+const gate = $('gate');
+async function plain() { const m = await import('./app.js'); m.start(p => fetch(p).then(r => { if (!r.ok) throw new Error(p); return r; })); }
+async function locked(k) {
+  gate.hidden = false;
+  $('nm').focus();
+  for (const id of ['nm', 'sid', 'pw']) $(id).oninput = () => { $('gateMsg').textContent = ''; };
+  gate.onsubmit = async e => {
+    e.preventDefault();
+    const msg = $('gateMsg');
+    const nm = $('nm').value.normalize('NFC').replace(/\s+/g, ''), sid = $('sid').value.replace(/\D/g, ''), pw = $('pw').value;
+    if (!nm || !sid || !pw) { msg.textContent = '성함, 학번, 비밀번호를 모두 입력하세요'; return; }
+    $('go').disabled = true; $('go').textContent = '확인 중…'; msg.textContent = '';
+    try {
+      const enc = new TextEncoder(), b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+      const base = await crypto.subtle.importKey('raw', enc.encode(`${nm}\n${sid}\n${pw}`), 'PBKDF2', false, ['deriveBits']);
+      const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: b64(k.salt), iterations: k.iter, hash: 'SHA-256' }, base, 256);
+      const idx = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bits))].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
+      if (!k.users[idx]) { msg.textContent = '접근 권한이 없습니다'; return; }
+      const open = async (key, u) => crypto.subtle.decrypt({ name: 'AES-GCM', iv: u.slice(0, 12) }, key, u.slice(12));
+      const mine = await crypto.subtle.importKey('raw', bits, 'AES-GCM', false, ['decrypt']);
+      const key = await crypto.subtle.importKey('raw', await open(mine, b64(k.users[idx])), 'AES-GCM', false, ['decrypt']);
+      const dec = async buf => open(key, new Uint8Array(buf));
+      const man = JSON.parse(new TextDecoder().decode(await dec(b64(k.man))));
+      const get = async p => {
+        const id = man[p];
+        if (!id) throw new Error(p);
+        const r = await fetch('b/' + id);
+        return new Response(await dec(await r.arrayBuffer()));
+      };
+      const code = await (await get('app.js')).text();
+      const css = await (await get('app.css')).text();
+      document.head.insertAdjacentHTML('beforeend', '<style>' + css + '</style>');
+      gate.remove();
+      const m = await import(URL.createObjectURL(new Blob([code], { type: 'text/javascript' })));
+      m.start(get);
+    } catch { msg.textContent = '접근 권한이 없습니다'; }
+    finally { if (gate.isConnected) { $('go').disabled = false; $('go').textContent = '들어가기'; } }
+  };
+}
+fetch('k.json').then(r => r.ok ? r.json() : null).catch(() => null).then(k => k ? locked(k) : plain());
+</script>
+</body>
+</html>
